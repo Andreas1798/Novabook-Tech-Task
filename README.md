@@ -119,6 +119,67 @@ These resolve ambiguities in the spec. They're documented here as required.
   and a `tax_events_ingested_total` counter (labelled by type).
 - **Health check** at `GET /health`.
 
+## POC scope vs. wider-system integration
+
+Several choices here are deliberate **proof-of-concept** simplifications. This
+section calls out what is POC-only and how each would change once the service is
+embedded in a larger system.
+
+### What is POC-only (and why)
+
+- **In-memory storage.** All state lives in process memory and resets on
+  restart. It keeps the POC dependency-free and makes the effective-dated logic
+  the focus. It is **not** durable, not shareable across instances, and unbounded
+  in growth.
+- **Synchronous, request-time computation.** The tax position is recomputed from
+  full history on every query via a linear scan. Correct and trivially
+  consistent at POC scale, but `O(events)` per query.
+- **Single instance, no concurrency control.** Node's single-threaded event loop
+  serialises mutations, so the POC needs no locking. That guarantee disappears
+  the moment you run more than one replica.
+- **HTTP-only ingestion.** Events arrive synchronously over HTTP. The brief's
+  `202 Accepted` already hints at an asynchronous, queue-backed design.
+- **No idempotency / dedupe.** Re-sending the same event double-counts. Fine for
+  a POC, unacceptable for at-least-once delivery upstream.
+- **No auth/tenancy.** Explicitly out of scope per the brief (single user).
+
+### How integration into a wider system would be handled
+
+- **Persistence → durable, append-only event store.** Replace the in-memory
+  arrays with a database (e.g. Postgres). The current model is already an
+  event log, so it maps directly onto an append-only `events` table; the
+  `TaxService` interface stays the same while the storage implementation is
+  swapped behind it. This gives durability, a shared source of truth across
+  instances, and an audit trail.
+- **Read performance → precomputed/materialised positions.** Rather than scan
+  all history per query, maintain running aggregates (e.g. per-item effective
+  value and cumulative tax) updated on ingest, or a materialised daily ledger
+  that a query can index into. Because events can be back- or future-dated, the
+  update must recompute from the affected effective date forward, not just
+  append.
+- **Ingestion → message queue.** In a wider system events would more likely
+  arrive from a broker (Kafka/SQS/PubSub) than direct HTTP. The `202` contract
+  fits this: accept, enqueue, acknowledge, and process asynchronously. The HTTP
+  layer becomes a thin adapter over the same domain service.
+- **Idempotency & ordering.** Add an event/idempotency key so retries and
+  at-least-once delivery don't double-count. Effective-dating already makes the
+  service insensitive to *processing* order, but dedupe must be explicit.
+- **Horizontal scaling & consistency.** With a shared store and stateless
+  instances the service scales out behind a load balancer; concurrency control
+  (transactions / optimistic locking on aggregates) replaces the implicit
+  single-thread guarantee.
+- **Multi-tenancy & auth.** Introduce a tenant/account key on every event and
+  query, authn/authz at the edge (gateway or middleware), and partition both
+  storage and metrics by tenant.
+- **Contracts & versioning.** Promote the `zod` schemas to a shared, versioned
+  API contract (OpenAPI / schema registry) so producers and consumers evolve
+  safely.
+- **Observability in context.** The structured logs and `/metrics` already plug
+  into a central stack: ship logs to aggregation (ELK/Loki), scrape Prometheus,
+  add distributed tracing (OpenTelemetry) with trace IDs propagated from upstream
+  callers, and wire `/health` (plus a `/ready` readiness probe) into the
+  orchestrator.
+
 ## Project layout
 
 ```
