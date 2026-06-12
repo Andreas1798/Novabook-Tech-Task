@@ -53,7 +53,7 @@ curl -X PATCH http://localhost:3000/sale \
 
 # Query tax position
 curl 'http://localhost:3000/tax-position?date=2024-02-22T17:29:39Z'
-# -> {"date":"2024-02-22T17:29:39Z","taxPosition":220}
+# -> {"date":"2024-02-22T17:29:39Z","taxPosition": -74781}
 ```
 
 ## How it works
